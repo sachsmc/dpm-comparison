@@ -1,0 +1,104 @@
+---
+title: "DPM Demo - nimble"
+date: "`r Sys.Date()`"
+format:
+  html:
+    code-fold: true
+editor_options: 
+  chunk_output_type: console
+engine: julia
+---
+
+## The model
+
+Starting off simply, let's say we want to estimate the density of waiting times between eruptions at Old Faithful.
+
+Let $y_1, \ldots, y_n$ denote a sample of waiting times, and introduce $z_1, \ldots, z_n$ the cluster membership. The model is 
+$$
+y_i | \{\beta_k^*\}, \{\lambda_k^*\}, z_i \sim \mbox{Gamma}(\beta_{z_i}^*, \lambda_{z_i}^*),
+$$
+$$
+({\beta}_k^{\star}, {\lambda}_k^{\star}) \mid H \sim H, 
+$$
+where $H$ is the product of two independent Gamma distributions with fixed parameters,
+$$
+\boldsymbol{z} | \boldsymbol{w} \sim \mbox{Discrete}(\boldsymbol{w}), 
+$$
+$$
+w_1=v_1, \quad\quad w_l=v_l\prod_{m=1}^{l-1}(1-v_m), \quad l=2, \ldots, L-1,\quad\quad w_L=\prod_{m=1}^{L-1}(1-v_m)
+$$
+with $v_l \mid \alpha\sim \mbox{Beta}(1, \alpha), l=1, \ldots, L-1$. Here $L$ is the truncation parameter. 
+
+
+## Implementation in Turing.jl
+
+Setup 
+
+
+```{julia}
+using Turing
+using Distributions
+#using StatsPlots
+
+wait = [79, 54, 74, 62, 85, 55, 88, 85, 51, 85, 54, 84, 78, 47, 83, 
+52, 62, 84, 52, 79, 51, 47, 78, 69, 74, 83, 55, 76, 78, 79, 73, 
+77, 66, 80, 74, 52, 48, 80, 59, 90, 80, 58, 84, 58, 73, 83, 64, 
+53, 82, 59, 75, 90, 54, 80, 54, 83, 71, 64, 77, 81, 59, 84, 48, 
+82, 60, 92, 78, 78, 65, 73, 82, 56, 79, 71, 62, 76, 60, 78, 76, 
+83, 75, 82, 70, 65, 73, 88, 76, 80, 48, 86, 60, 90, 50, 78, 63, 
+72, 84, 75, 51, 82, 62, 88, 49, 83, 81, 47, 84, 52, 86, 81, 75, 
+59, 89, 79, 59, 81, 50, 85, 59, 87, 53, 69, 77, 56, 88, 81, 45, 
+82, 55, 90, 45, 83, 56, 89, 46, 82, 51, 86, 53, 79, 81, 60, 82, 
+77, 76, 59, 80, 49, 96, 53, 77, 77, 65, 81, 71, 70, 81, 93, 53, 
+89, 45, 86, 58, 78, 66, 76, 63, 88, 52, 93, 49, 57, 77, 68, 81, 
+81, 73, 50, 85, 74, 55, 77, 83, 83, 51, 78, 84, 46, 83, 55, 81, 
+57, 76, 84, 77, 81, 87, 77, 51, 78, 60, 82, 91, 53, 78, 46, 77, 
+84, 49, 83, 71, 80, 49, 75, 64, 76, 53, 94, 55, 76, 50, 82, 54, 
+75, 78, 79, 78, 78, 70, 79, 70, 54, 86, 50, 90, 54, 54, 77, 79, 
+64, 75, 47, 86, 63, 85, 82, 57, 82, 67, 74, 54, 83, 73, 73, 88, 
+80, 71, 83, 56, 79, 78, 84, 58, 83, 43, 60, 75, 81, 46, 90, 46, 
+74];
+
+# Visualize data
+#histogram(wait, bins=25)
+```
+
+
+Define DP Gamma mixture model under stick-breaking construction
+
+```{julia}
+@model dp_gmm_sb(y, L) = begin
+    nobs = length(y)
+    betaStar ~ filldist(Gamma(71, 2), L)
+    lambdaStar ~ filldist(Gamma(2, 2), L) 
+
+    alpha ~ Gamma(1, 1)  
+    crm = DirichletProcess(alpha)
+    v ~ filldist(StickBreakingProcess(crm), L - 1)
+    eta = stickbreak(v)
+
+    distributions = [Gamma(betaStar[l], lambdaStar[l]) for l in 1:L]
+    k = Vector{Int}(undef, nobs)
+    for i in 1:nobs
+        k[i] ~ Categorical(eta)
+        y[i] ~ distributions[k[i]]
+    end
+end;
+
+faith_model = dp_gmm_sb(wait, 50)
+
+sampler = Gibbs(PG(10, :k), HMC(0.05, 10, :betaStar, :lambdaStar, :v))
+nsamples = 150
+nchains = 1
+burn = 10
+chains = sample(faith_model, sampler, MCMCThreads(), nsamples, nchains, discard_initial = burn);
+```
+
+
+### TODO
+
+1. Do some timing experiments (compilation time and running time)
+2. Try out different samples to see if it is doing conjugate updates correctly
+3. See if it is possible to modify the code to do conjugate updates
+4. Investigate how many iterations is enough?
+

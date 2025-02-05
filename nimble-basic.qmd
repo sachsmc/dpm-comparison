@@ -1,0 +1,147 @@
+---
+title: "DPM Demo - nimble"
+date: "`r Sys.Date()`"
+format:
+  html:
+    code-fold: true
+editor_options: 
+  chunk_output_type: console
+---
+
+## The model
+
+Starting off simply, let's say we want to estimate the density of waiting times between eruptions at Old Faithful.
+
+```{r}
+data(faithful)
+hist(faithful$waiting, freq = FALSE)
+```
+
+Let $y_1, \ldots, y_n$ denote a sample of waiting times, and introduce $z_1, \ldots, z_n$ the cluster membership. The model is 
+$$
+y_i | \{\beta_k^*\}, \{\lambda_k^*\}, z_i \sim \mbox{Gamma}(\beta_{z_i}^*, \lambda_{z_i}^*),
+$$
+$$
+({\beta}_k^{\star}, {\lambda}_k^{\star}) \mid H \sim H, 
+$$
+where $H$ is the product of two independent Gamma distributions with fixed parameters,
+$$
+\boldsymbol{z} | \boldsymbol{w} \sim \mbox{Discrete}(\boldsymbol{w}), 
+$$
+$$
+w_1=v_1, \quad\quad w_l=v_l\prod_{m=1}^{l-1}(1-v_m), \quad l=2, \ldots, L-1,\quad\quad w_L=\prod_{m=1}^{L-1}(1-v_m)
+$$
+with $v_l \mid \alpha\sim \mbox{Beta}(1, \alpha), l=1, \ldots, L-1$. Here $L$ is the truncation parameter. 
+
+
+## Implementation in nimble
+
+The model in nimble code (taken from https://r-nimble.org/nimbleExamples/bnp_density.html)
+
+```{r}
+library(nimble)
+
+code <- nimbleCode(
+  {
+    for(i in 1:n) {
+      y[i] ~ dgamma(shape = beta[i], scale = lambda[i])
+      beta[i] <- betaStar[z[i]]
+      lambda[i] <- lambdaStar[z[i]]
+      z[i] ~ dcat(w[1:Trunc])
+    }
+    for(i in 1:(Trunc-1)) { # stick-breaking variables
+      v[i] ~ dbeta(1, alpha)
+    }
+    w[1:Trunc] <- stick_breaking(v[1:(Trunc-1)]) # stick-breaking weights
+    for(i in 1:Trunc) {
+      betaStar[i] ~ dgamma(shape = 71, scale = 2)
+      lambdaStar[i] ~ dgamma(shape = 2, scale = 2)
+    }
+    alpha ~ dgamma(1, 1)
+  }
+)
+```
+
+
+Running the model 
+
+```{r}
+data <- list(y = faithful$waiting)
+set.seed(1)
+consts <- list(n = length(faithful$waiting), Trunc = 50)
+inits <- list(betaStar = rgamma(consts$Trunc, shape = 71, scale = 2),
+              lambdaStar = rgamma(consts$Trunc, shape = 2, scale = 2),
+              v = rbeta(consts$Trunc-1, 1, 1),
+              z = sample(1:10, size = consts$n, replace = TRUE), 
+              alpha = 1)
+
+rModel <- nimbleModel(code, data = data, inits = inits, constants = consts) 
+cModel <- compileNimble(rModel, dirName = "nimble-cpp", projectName = "faithful-dpm")
+
+conf <- configureMCMC(rModel, monitors = c("w", "betaStar", "lambdaStar", 'z', 'alpha')) 
+mcmc <- buildMCMC(conf) 
+cmcmc <- compileNimble(mcmc, project = rModel)  
+samples <- runMCMC(cmcmc, niter = 8000, nburnin = 2000, setSeed = TRUE)
+```
+
+Inspecting the results
+```{r}
+betaStarSamples <- samples[ , grep('betaStar', colnames(samples))]
+lambdaStarSamples <- samples[ , grep('lambdaStar', colnames(samples))]
+weightSamples <- samples[ , grep('w', colnames(samples))]
+
+grid <- seq(40, 100, len = 200)
+
+densitySamples <- matrix(0, ncol = length(grid), nrow = nrow(samples))
+for(i in 1:nrow(samples)) {
+  densitySamples[i, ] <- sapply(grid, function(x) 
+    sum(weightSamples[i, ] * dgamma(x, shape = betaStarSamples[i, ],
+                                    scale = lambdaStarSamples[i, ])))
+}
+
+hist(faithful$waiting, freq = FALSE,  xlab = "Waiting times", ylim=c(0,0.05),
+     main = '')
+lines(grid, apply(densitySamples, 2, mean), lwd = 2, col = 'black') 
+lines(grid, apply(densitySamples, 2, quantile, 0.025), lwd = 2, lty = 2, col = 'black')
+lines(grid, apply(densitySamples, 2, quantile, 0.975), lwd = 2, lty = 2, col = 'black')
+```
+
+### TODO
+
+1. Do some timing experiments (compilation time and running time)
+2. Inspect the Cpp code to see if it is doing conjugate updates correctly
+3. See if it is possible to modify the code to do conjugate updates
+4. Investigate how many iterations is enough?
+
+## Implementation in Turing.jl
+
+Setup 
+
+```{julia}
+#| include: false
+using Turing
+using Turing: Variational
+using Turing.RandomMeasures: stickbreak, DirichletProcess, StickBreakingProcess
+using Distributions
+```
+
+
+Define DP Gamma mixture model under stick-breaking construction
+```{julia}
+@model dp_gmm_sb(y, K) = begin
+    nobs = length(y)
+
+    mu ~ filldist(Normal(0, 3), K)
+    sig ~ filldist(Gamma(1, 1/10), K)  # mean = 0.1
+
+    alpha ~ Gamma(1, 1/10)  # mean = 0.1
+    crm = DirichletProcess(alpha)
+    v ~ filldist(StickBreakingProcess(crm), K - 1)
+    eta = stickbreak(v)
+
+    y .~ UnivariateGMM(mu, sig, Categorical(eta))
+end;
+
+```
+
+
