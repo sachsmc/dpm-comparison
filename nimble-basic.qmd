@@ -76,7 +76,7 @@ inits <- list(betaStar = rgamma(consts$Trunc, shape = 71, scale = 2),
               alpha = 1)
 
 rModel <- nimbleModel(code, data = data, inits = inits, constants = consts) 
-cModel <- compileNimble(rModel, dirName = "nimble-cpp", projectName = "faithful-dpm")
+cModel <- compileNimble(rModel, projectName = "faithful-dpm")
 
 conf <- configureMCMC(rModel, monitors = c("w", "betaStar", "lambdaStar", 'z', 'alpha')) 
 mcmc <- buildMCMC(conf) 
@@ -113,35 +113,5 @@ lines(grid, apply(densitySamples, 2, quantile, 0.975), lwd = 2, lty = 2, col = '
 3. See if it is possible to modify the code to do conjugate updates
 4. Investigate how many iterations is enough?
 
-## Implementation in Turing.jl
-
-Setup 
-
-```{julia}
-#| include: false
-using Turing
-using Turing: Variational
-using Turing.RandomMeasures: stickbreak, DirichletProcess, StickBreakingProcess
-using Distributions
-```
-
-
-Define DP Gamma mixture model under stick-breaking construction
-```{julia}
-@model dp_gmm_sb(y, K) = begin
-    nobs = length(y)
-
-    mu ~ filldist(Normal(0, 3), K)
-    sig ~ filldist(Gamma(1, 1/10), K)  # mean = 0.1
-
-    alpha ~ Gamma(1, 1/10)  # mean = 0.1
-    crm = DirichletProcess(alpha)
-    v ~ filldist(StickBreakingProcess(crm), K - 1)
-    eta = stickbreak(v)
-
-    y .~ UnivariateGMM(mu, sig, Categorical(eta))
-end;
-
-```
 
 
