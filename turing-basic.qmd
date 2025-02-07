@@ -1,5 +1,5 @@
 ---
-title: "DPM Demo - nimble"
+title: "DPM Demo - Turing.jl"
 date: "`r Sys.Date()`"
 format:
   html:
@@ -32,13 +32,19 @@ with $v_l \mid \alpha\sim \mbox{Beta}(1, \alpha), l=1, \ldots, L-1$. Here $L$ is
 
 ## Implementation in Turing.jl
 
-Setup 
-
+This does not use the above model, but rather a Gaussian mixture. It works, but apparently it is very sensitive to location and scale, which is why I center and scale the waiting times. 
 
 ```{julia}
+#import Pkg
+#Pkg.add(["Turing", "Flux", "Distributions", "Plots", "StatsPlots"])
+
 using Turing
+using Turing: Variational
+using Flux
 using Distributions
-#using StatsPlots
+using Plots
+using StatsPlots
+using Turing.RandomMeasures: stickbreak, DirichletProcess, StickBreakingProcess
 
 wait = [79, 54, 74, 62, 85, 55, 88, 85, 51, 85, 54, 84, 78, 47, 83, 
 52, 62, 84, 52, 79, 51, 47, 78, 69, 74, 83, 55, 76, 78, 79, 73, 
@@ -59,39 +65,74 @@ wait = [79, 54, 74, 62, 85, 55, 88, 85, 51, 85, 54, 84, 78, 47, 83,
 80, 71, 83, 56, 79, 78, 84, 58, 83, 43, 60, 75, 81, 46, 90, 46, 
 74];
 
-# Visualize data
-#histogram(wait, bins=25)
+wait_norm = (wait .- mean(wait)) ./ sqrt(var(wait))
+
+histogram(wait_norm)
 ```
 
 
-Define DP Gamma mixture model under stick-breaking construction
+Define DP Gaussian mixture model under stick-breaking construction
 
 ```{julia}
-@model dp_gmm_sb(y, L) = begin
-    nobs = length(y)
-    betaStar ~ filldist(Gamma(71, 2), L)
-    lambdaStar ~ filldist(Gamma(2, 2), L) 
+@model dp_gmm_sb(y, K) = begin
+    mu ~ filldist(Normal(0, 1), K)
+    sig ~ filldist(Gamma(1, 1/10), K)  # mean = 0.1
 
-    alpha ~ Gamma(1, 1)  
+    alpha ~ Gamma(1, 1/10)  # mean = 0.1
     crm = DirichletProcess(alpha)
-    v ~ filldist(StickBreakingProcess(crm), L - 1)
+    v ~ filldist(StickBreakingProcess(crm), K - 1)
     eta = stickbreak(v)
 
-    distributions = [Gamma(betaStar[l], lambdaStar[l]) for l in 1:L]
-    k = Vector{Int}(undef, nobs)
-    for i in 1:nobs
-        k[i] ~ Categorical(eta)
-        y[i] ~ distributions[k[i]]
-    end
+    y .~ UnivariateGMM(mu, sig, Categorical(eta))
 end;
+```
 
-faith_model = dp_gmm_sb(wait, 50)
 
-sampler = Gibbs(PG(10, :k), HMC(0.05, 10, :betaStar, :lambdaStar, :v))
-nsamples = 150
-nchains = 1
-burn = 10
-chains = sample(faith_model, sampler, MCMCThreads(), nsamples, nchains, discard_initial = burn);
+Sample using Variational inference, this seems to be the most promising approach, from a computing time point of view. 
+
+```{julia}
+K = 10
+faith_model = dp_gmm_sb(wait_norm,  K)
+q0 = Variational.meanfield(faith_model)  # initialize variational distribution (optional)
+advi = ADVI(1, 2000)  # num_elbo_samples, max_iters
+q = vi(faith_model, advi, q0, optimizer=Adam(1e-2));
+
+nsamples = 10000
+chains = rand(q, nsamples)
+
+```
+
+Visualize the results
+
+Histogram and estimated density.
+```{julia}
+densGrid = -2:0.01:2
+
+dens = Array{Float64}(undef, (nsamples,length(densGrid)))
+for i in 1:nsamples
+    dens[i,:] = pdf(UnivariateGMM(chains[1:K,i], chains[(K+1):(K+K), i], 
+        Categorical(stickbreak(chains[(K+K+2):(3*K),i]))), densGrid)
+end
+
+meandens = Vector{Float64}(undef, length(densGrid))
+for i in 1:length(densGrid)
+    meandens[i] = mean(dens[:,i])
+end
+
+# Visualize data
+histogram(wait_norm, bins=55, normalize=:pdf)
+plot!(densGrid, mean(dens, dims = 1)[1,:])
+plot!(densGrid, mapslices(x -> quantile(x, .025), dens, dims = 1)[1,:], 
+color = "black")
+plot!(densGrid, mapslices(x -> quantile(x, .975), dens, dims = 1)[1,:], 
+color = "black")
+```
+
+Visualize cluster weights
+
+```{julia}
+boxplot(reduce(vcat, repeat([1:10], outer = nsamples)), 
+reduce(vcat, [stickbreak(chains[(K+K+2):(3*K),i]) for i in 1:nsamples]))
 ```
 
 
