@@ -1,0 +1,259 @@
+# Comparison of conjugate and random walk samplers in NIMBLE
+
+```{r}
+library(nimble)
+library(tidyverse)
+```
+
+## Data generating process
+
+The example with the Gamma likelihood and prior doesn't lead to conjugacy (Gamma
+likelihood with independent Gamma priors on rate and scale is not conjugate). I
+instead do a simple model, which is a mixture of five normals that all have the
+same known standard deviation.
+
+I use the following data generating process:
+
+```{r}
+set.seed(1354)
+n_clusters <- 4
+n_sim <- 1000
+known_sd <- 0.3
+## v_true <- c(rbeta(n_clusters-1, 1, 3))
+## w_true <- stick_breaking(v_true)
+## mu_true = rnorm(n_clusters, 0, 5)
+w_true <- c(0.5, 0.25, 0.125, 0.125)
+mu_true <- c(-6, -2, 2, 6)
+
+sim_dat <- tibble(
+    z = sample(1:n_clusters, size = n_sim, replace = TRUE, prob = w_true),
+    y = rnorm(n_sim, mu_true[z], known_sd)
+)
+
+sim_dat |>
+    mutate(z = as.character(z)) |>
+    ggplot() +
+    geom_histogram(aes(x = y, fill = z), bins = 200)
+```
+
+## DPM model with stick-breaking
+
+We will use the following DPM as our model.
+
+```
+Y_i | mu_i, F ~ Normal(mu_i, sd=known_sd), i = 1,...,n_obs
+mu_i | F ~ F, i = 1,...,n_obs
+F ~ DP(alpha, Normal(0, sd=mu_prior_sd))
+```
+
+Truncating at max number of clusters K=20, we get the stick-breaking prior.
+
+```
+Y_i | Z_i, mu ~ Normal(mu[Z_i], sd=known_sd)
+Z_i ~ Categorical(w)
+w_j = v_j * (1-v_1) * ... * (1-v_{j-1}), j = 1,...,K
+v_K = 1
+v_j = Beta(1, alpha), j = 1,...,K-1
+mu_k ~ Normal(0, sd=mu_prior_sd), k = 1,...,K
+alpha ~ Gamma(3, 1)
+```
+
+```{r}
+code <- nimbleCode(
+  {
+    for(i in 1:n) {
+      y[i] ~ dnorm(mu[i], sd = known_sd)
+      mu[i] <- mu_star[z[i]]
+      z[i] ~ dcat(w[1:Trunc])
+    }
+    for(i in 1:(Trunc-1)) { # stick-breaking variables
+      v[i] ~ dbeta(1, alpha)
+    }
+    w[1:Trunc] <- stick_breaking(v[1:(Trunc-1)]) # stick-breaking weights
+    for(i in 1:Trunc) {
+        mu_star[i] ~ dnorm(0, sd = mu_prior_sd)
+    }
+    alpha ~ dgamma(1, 1)
+  }
+)
+```
+
+```{r}
+data <- list(y = sim_dat$y)
+set.seed(1210)
+consts <- list(n = length(data$y),
+               Trunc = 20,
+               known_sd = known_sd,
+               mu_prior_sd = 5)
+inits <- list(mu_star = rnorm(consts$Trunc, 0, consts$mu_prior_sd),
+              v = rbeta(consts$Trunc-1, 1, 1),
+              # Init with 10 clusters of roughly equal size
+              z = sample(1:10, size = consts$n, replace = TRUE),
+              alpha = 2)
+
+rModel <- nimbleModel(code, data = data, inits = inits, constants = consts) 
+```
+
+## Using Gibbs with conjugate step for mu_star
+
+```{r}
+cModel <- compileNimble(rModel)
+conf <- configureMCMC(rModel, monitors = c("w", "mu_star", "z", "alpha")) 
+```
+
+We can see that it has correctly detected that mu_star can be sampled with a
+conjugate sampler, since the Normal prior for mu is conjugate to the normal
+likelihood for y.
+
+We now compile.
+
+```{r}
+mcmc <- buildMCMC(conf) 
+cmcmc <- compileNimble(mcmc, project = rModel)
+```
+
+I now sample and time.
+
+```{r}
+start_time <- Sys.time()
+samples_conjugate <- runMCMC(cmcmc, niter = 24000, nburnin = 4000, setSeed = TRUE, summary = TRUE)
+end_time <- Sys.time()
+time_conjugate <- end_time - start_time
+```
+
+Calculate effective sample sizes for all monitored parameters.
+
+```{r}
+ess_conjugate <- mcmcse::ess(samples_conjugate$samples)
+```
+
+Check mixing of alpha, mu_star[1], and w[1]
+
+```{r}
+ggplot() +
+    geom_line(aes(x = 1:nrow(samples_conjugate$samples), y = samples_conjugate$samples[, "alpha"]))
+## Looks fine
+
+ggplot() +
+    geom_line(aes(x = 1:nrow(samples_conjugate$samples), y = samples_conjugate$samples[, "mu_star[1]"]))
+## Looks fine
+
+ggplot() +
+    geom_line(aes(x = 1:nrow(samples_conjugate$samples), y = samples_conjugate$samples[, "w[1]"]))
+## Looks ok, given that it is a bounded parameter
+```
+
+Let us check whether the posterior intervals are are close to the true values.
+
+```{r}
+samples_conjugate$summary[1:41, ]
+```
+
+```{r}
+w_true
+```
+
+We see that we roughly recover the four clusters.
+
+## Using Gibbs with random walk Metropolis-Hasting step for mu_star
+
+```{r}
+conf$removeSamplers(c("alpha", "mu_star"))
+conf$addSampler(target = c("alpha", "mu_star"), type = "RW_block")
+```
+
+```{r}
+mcmc <- buildMCMC(conf, resetFunctions = TRUE) 
+cmcmc <- compileNimble(mcmc, project = rModel, resetFunctions=TRUE)
+```
+
+```{r}
+start_time <- Sys.time()
+samples_rw <- runMCMC(cmcmc, niter = 24000, nburnin = 4000, setSeed = TRUE, summary = TRUE)
+end_time <- Sys.time()
+time_rw <- end_time - start_time
+```
+
+```{r}
+ess_rw <- mcmcse::ess(samples_rw$samples)
+```
+
+Check mixing.
+
+```{r}
+ggplot() +
+    geom_line(aes(x = 1:nrow(samples_rw$samples), y = samples_rw$samples[, "alpha"]))
+## Very poor mixing
+
+ggplot() +
+    geom_line(aes(x = 1:nrow(samples_rw$samples), y = samples_rw$samples[, "mu_star[1]"]))
+## Looks fine
+
+ggplot() +
+    geom_line(aes(x = 1:nrow(samples_rw$samples), y = samples_rw$samples[, "w[1]"]))
+## Looks ok, aside from the large spike downwards
+```
+
+Let us check whether the posterior intervals are are close to the true values.
+
+```{r}
+samples_rw$summary[1:41, ]
+```
+
+We still seem to recover the clusters.
+
+```{r}
+w_true
+```
+
+## Auto configuration when we say that we won't use conjugacy for any paramters
+
+Here it won't even use conjugacy for v.
+
+```{r}
+conf_no_conjugacy <- configureMCMC(rModel, monitors = c("w", "mu_star", "z", "alpha"),
+                                   useConjugacy = FALSE) 
+```
+
+```{r}
+mcmc <- buildMCMC(conf_no_conjugacy, resetFunctions = TRUE) 
+cmcmc <- compileNimble(mcmc, project = rModel, resetFunctions=TRUE)
+```
+
+```{r}
+start_time <- Sys.time()
+samples_no_conjugacy <- runMCMC(cmcmc, niter = 24000, nburnin = 4000, setSeed = TRUE, summary = TRUE)
+end_time <- Sys.time()
+time_no_conjugacy <- end_time - start_time
+```
+
+```{r}
+ess_no_conjugacy <- mcmcse::ess(samples_no_conjugacy$samples)
+```
+
+## Compare ESS per time unit
+
+We take the mean ESS for `mu_star_1, ..., mu_star_4, w[1], ..., w[4]` (since these must be
+the parameters of highest interest, for which we would like a high ESS).
+
+```{r}
+params_of_interest <- c(str_c("mu_star[", 1:4, "]"),
+                        str_c("w[", 1:4, "]"))
+performance = c(
+    conjugate = mean(ess_conjugate[params_of_interest]) / as.numeric(time_conjugate),
+    rw = mean(ess_rw[params_of_interest]) / as.numeric(time_rw),
+    no_conjugacy = mean(ess_no_conjugacy[params_of_interest]) / as.numeric(time_no_conjugacy)
+)
+print(performance)
+```
+
+We see that we get more than double the nr of effective samples per time unit
+when using the conjugate sampler.
+
+Result from running:
+
+`
++ print(performance)
+   conjugate           rw no_conjugacy 
+    4865.115     2125.811     2303.110 
+`
