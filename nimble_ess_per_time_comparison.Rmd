@@ -34,6 +34,8 @@ sim_dat |>
     mutate(z = as.character(z)) |>
     ggplot() +
     geom_histogram(aes(x = y, fill = z), bins = 200)
+
+write_csv(sim_dat, "data/sim_dat.csv")
 ```
 
 ## DPM model with stick-breaking
@@ -55,7 +57,7 @@ w_j = v_j * (1-v_1) * ... * (1-v_{j-1}), j = 1,...,K
 v_K = 1
 v_j = Beta(1, alpha), j = 1,...,K-1
 mu_k ~ Normal(0, sd=mu_prior_sd), k = 1,...,K
-alpha ~ Gamma(3, 1)
+alpha ~ Gamma(1, 1)
 ```
 
 ```{r}
@@ -92,12 +94,12 @@ inits <- list(mu_star = rnorm(consts$Trunc, 0, consts$mu_prior_sd),
               alpha = 2)
 
 rModel <- nimbleModel(code, data = data, inits = inits, constants = consts) 
+cModel <- compileNimble(rModel)
 ```
 
 ## Using Gibbs with conjugate step for mu_star
 
 ```{r}
-cModel <- compileNimble(rModel)
 conf <- configureMCMC(rModel, monitors = c("w", "mu_star", "z", "alpha")) 
 ```
 
