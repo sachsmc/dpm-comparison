@@ -3,6 +3,7 @@ using CSV, DataFrames
 using MCMCChains
 using Turing: Variational
 using Turing.RandomMeasures: stickbreak, DirichletProcess, StickBreakingProcess
+using Optimisers
 
 @model dp_model(y, Trunc) = begin
     n_obs = length(y)
@@ -20,9 +21,6 @@ using Turing.RandomMeasures: stickbreak, DirichletProcess, StickBreakingProcess
     end
 end
 
-# TODO: Read data from csv (save from R) and fit
-# Check https://github.com/luiarthur/TuringBnpBenchmarks/blob/master/src/dp-gmm/notebooks//dp_sb_gmm_turing.ipynb for code
-
 sim_dat = CSV.read("data/sim_dat.csv", DataFrame)
 z = sim_dat.z
 y = sim_dat.y
@@ -39,3 +37,14 @@ chain = chain[(n_warmup+1):(n_samples+n_warmup),:,:]
 println(chain)
 
 display(summarystats(chain))
+
+q0 = Variational.meanfield(mod)
+advi = ADVI(1, 2000)
+q = vi(mod, advi, q0)
+
+display(q)
+
+nsamples = 10000
+chain_vi = rand(q, nsamples)
+
+display(summarystats(chain_vi))
